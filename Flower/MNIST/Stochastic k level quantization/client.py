@@ -110,10 +110,7 @@ def encoder(params):
     """
 
     # Flattening the parameters.
-    flat_params = []
-    for layer in params:
-        flat_params.extend(torch.Tensor.flatten(layer.data))
-    flat_params = torch.tensor(flat_params)
+    flat_params = nn.utils.parameters_to_vector(model.parameters()).detach()
 
     # si (as given in the paper)
     si = torch.max(flat_params) - torch.min(flat_params)
