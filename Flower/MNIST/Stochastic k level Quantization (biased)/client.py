@@ -144,7 +144,7 @@ def encoder(params):
 
 
 def decoder(encs, brs):
-    """A decoding function.
+    """A decoding function.(biased)
 
     Args:
         encs (ndarray): an array with 1s and 0s.
@@ -154,9 +154,11 @@ def decoder(encs, brs):
         list: list of ndarrays sent to the server.
     """
 
-    # replacing 1s with corresponding B(r+1)
-    # and 0s with corresponding B(r).
-    torch.where(encs == 1, brs[:, 1], brs[:, 0])
+    a = ((3*brs[:, 1]) + brs[:, 0])/4
+    b = ((3*brs[:, 0]) + brs[:, 1])/4
+    # replacing 1s with corresponding (3B(r+1)+B(r))/4
+    # and 0s with corresponding (3B(r)+B(r+1))/4.
+    torch.where(encs == 1, a, b)
 
     # reconstructing the parameters into their
     # original shapes from flattened array.
