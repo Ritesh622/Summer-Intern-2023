@@ -129,7 +129,7 @@ class FlowerClient(fl.client.NumPyClient):
     def evaluate(self, parameters, config):
         print("[EVAL, RECEIVED PARAMETERS FROM SERVER]")
         self.set_parameters(parameters, config)
-        loss, acc = val(self.model, valloader)
+        loss, acc = val(self.model, self.valloader)
         print("[EVAL, SENDING METRICS TO SERVER]")
         return float(loss), len(self.valloader.dataset), {"accuracy": float(acc),
                                                           "losss": float(loss)}
