@@ -19,14 +19,17 @@ def fit_config(server_round):
 
 
 strategy = FedAvg(
-    min_available_clients=5,
+    min_available_clients=10,
     min_fit_clients=5,
     min_evaluate_clients=3,
-    fraction_fit=1.0,
-    fraction_evaluate=1.0,
+    fraction_fit=0.8,
+    fraction_evaluate=0.4,
     on_fit_config_fn=fit_config,
     evaluate_metrics_aggregation_fn=eval_weighted_average,
 )
+
+# strategy = FedAvg(on_fit_config_fn=fit_config,
+#                   evaluate_metrics_aggregation_fn=eval_weighted_average)
 
 
 fl.server.start_server(

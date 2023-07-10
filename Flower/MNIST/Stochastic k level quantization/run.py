@@ -1,7 +1,7 @@
 import subprocess
 import multiprocessing
 
-NUM_CLIENTS = 5
+NUM_CLIENTS = 10
 
 
 def run_client(_):

@@ -7,11 +7,11 @@ import flwr as fl
 from collections import OrderedDict
 
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print(DEVICE)
 
 BATCH_SIZE = 32
-K = 2  # no. of levels of Quantization
+K = 64  # no. of levels of Quantization
 print(K)
 
 
@@ -99,72 +99,79 @@ trainloader, valloader = load_dataset()
 
 
 def encoder(params):
-    """An Encoding function
+    """an encoding function
 
     Args:
-        params (list): list of tensors of model paramters generator.
+        params (tensor(2-d or 1-d)): parameters as tensor for batch size 1024 or 512
 
     Returns:
-        ndarray, ndarray: an array of 1s and 0s. 
-                        and an array of corresponding B(r+1)s and B(r)s.
+        tensor: tensor of 1s and 0s. 
+                tensor of B(r+1)s and B(r)s for each parameter.
     """
 
-    # Flattening the parameters.
-    flat_params = nn.utils.parameters_to_vector(model.parameters()).detach()
+    # finding quantization levels using the formula from paper
+    s = torch.max(params) - torch.min(params)
+    b = torch.min(params) + ((s * torch.arange(K, device=DEVICE))/(K-1))
 
-    # si (as given in the paper)
-    si = torch.max(flat_params) - torch.min(flat_params)
+    # finding B(r)s for each parameter
+    ids = torch.searchsorted(b, params.contiguous(), side='right')-1
 
-    # Quantization levels
-    Bi = torch.min(flat_params) + ((si * torch.arange(K))/(K-1))
+    # converting into points (B(r+1), B(r))
+    pts = torch.cat((
+        torch.unsqueeze(ids, -1),
+        torch.unsqueeze(ids+1, -1)
+    ), axis=-1)
 
-    # B(r)
-    ids = torch.searchsorted(Bi, flat_params, side='right')-1
-
-    # stacking the points as (B(r), B(r+1))
-    pts = torch.stack((ids, ids+1)).T
-
-    # for np.max(xi) B(r+1) will be out of index.
-    # replacing B(r+1) with B(r) solves the problem.
+    # solving special case for max(params)
+    # by replacing both B(r+1) and B(r) for max(params)
+    # with max(params) i.e with last quantization value.
     pts[pts == K] = K-1
 
-    # converting points to Quantization values
-    # from which interval the parameter belongs to.
-    brs = Bi[pts]
+    # converting points into corresponding quanization levels
+    brs = b[pts]
 
-    # finding probabilities with which encoded value of parameter depends on.
-    # giving 0 as probability for np.max(xi)
-    probs = torch.where(
-        (brs[:, 1] - brs[:, 0]) != 0,
-        (flat_params-brs[:, 0]) / (brs[:, 1] - brs[:, 0]),
-        0)
-
-    # sending 1s and 0s using the above probailities.
-    return torch.bernoulli(probs), brs
+    # finding probabilties of params by which their value is 1.
+    # as B(r+1)==B(r) for max(params) its probability will be zero.
+    probs = torch.where(brs[..., 1] != brs[..., 0],
+                        (params - brs[..., 0]) / (brs[..., 1] - brs[..., 0]), 0)
+    
+    # sending 1s and 0s with their corresponding probabilities.
+    encs = torch.bernoulli(probs)
+    return encs, brs
 
 
-def decoder(encs, brs):
-    """A decoding function.
+def decoder(encs_brs_1024, encs_brs_512):
+    """a decoding function as per DME.
 
     Args:
-        encs (ndarray): an array with 1s and 0s.
-        brs (ndarray): corresponding B(r+1) and B(r) values of parameters.
+        encs_brs_1024 (2-d tensor): tensor of params with 1024 batchsize
+        encs_brs_512 (1-d tensor): tensor of params with 512 batchsize
 
     Returns:
-        list: list of ndarrays sent to the server.
+        list: list of parameters(type=ndarray) sent to server.
     """
 
-    # replacing 1s with corresponding B(r+1)
-    # and 0s with corresponding B(r).
-    torch.where(encs == 1, brs[:, 1], brs[:, 0])
+    # replacing 1s with B(r+1) and 0s with B(r)
+    dec1024 = torch.where(
+        encs_brs_1024[0] == 1,
+        encs_brs_1024[1][..., 1],
+        encs_brs_1024[1][..., 0]
+    )
+    dec512 = torch.where(
+        encs_brs_512[0] == 1,
+        encs_brs_512[1][..., 1],
+        encs_brs_512[1][..., 0]
+    )
 
-    # reconstructing the parameters into their
-    # original shapes from flattened array.
+    # flattening the whole decoded parameters.
+    dec = torch.cat((torch.flatten(dec1024), dec512))
+
+    # reconstructing the parameters into their correspondind shapes.
     revert = []
     ptr = 0
     for layer in model.parameters():
         size = layer.numel()
-        revert.append(encs[ptr: ptr+size].reshape(layer.shape).numpy())
+        revert.append(dec[ptr: ptr+size].reshape(layer.shape).cpu().numpy())
         ptr += size
     return revert
 
@@ -178,10 +185,26 @@ class FlowerClient(fl.client.NumPyClient):
 
     def get_parameters(self, config):
         print("[SENDING PARAMETERS TO SERVER]")
-        params = self.model.parameters()
-        encs, brs = encoder(params)
-        param_hats = decoder(brs=brs, encs=encs)
-        return param_hats
+        
+        # flattening the parameters
+        flat_params = nn.utils.parameters_to_vector(
+            self.model.parameters()).detach()
+        
+        # splitting parameters into 1024 batches each
+        params1024 = torch.split(
+            flat_params[:flat_params.numel()-flat_params.numel() % 1024], 1024)
+        params1024 = torch.stack(params1024) # we can also flatten the parameters.
+
+        # for LeNet-5 remaining parameters' closest ceil of 2 powers is 512
+        params512 = flat_params[-(flat_params.numel() % 1024):]
+        # padding params512 to make their size 512.
+        params512 = torch.cat((params512, torch.zeros(int(
+            2**torch.ceil(torch.log2(torch.tensor(params512.numel()))) - params512.numel())).to(DEVICE)))
+
+        encs_brs_1024 = encoder(params1024)
+        encs_brs_512 = encoder(params512)
+        return decoder(encs_brs_1024=encs_brs_1024,
+                       encs_brs_512=encs_brs_512)
 
     def set_parameters(self, parameters, config):
         param_dict = zip(self.model.state_dict().keys(), parameters)
@@ -203,7 +226,7 @@ class FlowerClient(fl.client.NumPyClient):
     def evaluate(self, parameters, config):
         print("[EVAL, RECEIVED PARAMETERS FROM SERVER]")
         self.set_parameters(parameters, config)
-        loss, acc = val(self.model, valloader)
+        loss, acc = val(self.model, self.valloader)
         print("[EVAL, SENDING METRICS TO SERVER]")
         return float(loss), len(self.valloader.dataset), {"accuracy": float(acc),
                                                           "losss": float(loss)}

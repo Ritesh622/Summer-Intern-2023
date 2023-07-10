@@ -101,39 +101,80 @@ trainloader, valloader = load_dataset()
 
 
 def encoder(params):
+    """an encoding function as per DME.
 
+    Args:
+        params (tensor(2-d or 1-d)): parameters as tensor for batch size 1024 or 512
+
+    Returns:
+        tensor: tensor of 1s and 0s. 
+                tensor of B(r+1)s and B(r)s for each parameter.
+    """
+
+    # finding quantization levels using the formula from paper
     s = torch.max(params) - torch.min(params)
     b = torch.min(params) + ((s * torch.arange(K, device=DEVICE))/(K-1))
+
+    # finding B(r)s for each parameter
     ids = torch.searchsorted(b, params.contiguous(), side='right')-1
+
+    # converting into points (B(r+1), B(r))
     pts = torch.cat((
         torch.unsqueeze(ids, -1),
         torch.unsqueeze(ids+1, -1)
     ), axis=-1)
+
+    # solving special case for max(params)
+    # by replacing both B(r+1) and B(r) for max(params)
+    # with max(params) i.e with last quantization value.
     pts[pts == K] = K-1
+
+    # converting points into corresponding quanization levels
     brs = b[pts]
+
+    # finding probabilties of params by which their value is 1.
+    # as B(r+1)==B(r) for max(params) its probability will be zero.
     probs = torch.where(brs[..., 1] != brs[..., 0],
                         (params - brs[..., 0]) / (brs[..., 1] - brs[..., 0]), 0)
+    
+    # sending 1s and 0s with their corresponding probabilities.
     encs = torch.bernoulli(probs)
     return encs, brs
 
 
 def decoder(encs_brs_1024, encs_brs_512):
+    """a decoding function as per DME.
+
+    Args:
+        encs_brs_1024 (2-d tensor): tensor of params with 1024 batchsize
+        encs_brs_512 (1-d tensor): tensor of params with 512 batchsize
+
+    Returns:
+        list: list of parameters(type=ndarray) sent to server.
+    """
+
+    # replacing 1s with B(r+1) and 0s with B(r)
     dec1024 = torch.where(
         encs_brs_1024[0] == 1,
         encs_brs_1024[1][..., 1],
         encs_brs_1024[1][..., 0]
     )
+    # doing inv(R) @ zi
     dec1024 = torch.matmul(torch.linalg.inv(R1024), dec1024.T).T
 
+    # replacing 1s with B(r+1) and 0s with B(r)
     dec512 = torch.where(
         encs_brs_512[0] == 1,
         encs_brs_512[1][..., 1],
         encs_brs_512[1][..., 0]
     )
+    # doing inv(R) @ zi
     dec512 = torch.matmul(torch.linalg.inv(R512), dec512)
 
+    # flattening the whole decoded parameters.
     dec = torch.cat((torch.flatten(dec1024), dec512))
 
+    # reconstructing the parameters into their correspondind shapes.
     revert = []
     ptr = 0
     for layer in model.parameters():
@@ -153,17 +194,23 @@ class FlowerClient(fl.client.NumPyClient):
     def get_parameters(self, config):
         print("[SENDING PARAMETERS TO SERVER]")
 
+        # flattening the parameters
         flat_params = nn.utils.parameters_to_vector(
             self.model.parameters()).detach()
-
+        
+        # splitting parameters into 1024 batches each
         params1024 = torch.split(
             flat_params[:flat_params.numel()-flat_params.numel() % 1024], 1024)
         params1024 = torch.stack(params1024)
+        # preprocessing the parameters by matrix multipling R with xi
         params1024 = torch.matmul(R1024, params1024.T).T
 
+        # for LeNet-5 remaining parameters' closest ceil of 2 powers is 512
         params512 = flat_params[-(flat_params.numel() % 1024):]
+        # padding params512 to make their size 512.
         params512 = torch.cat((params512, torch.zeros(int(
-            2**torch.ceil(torch.log2(torch.tensor(params512.numel()))) - params512.numel())).to(DEVICE)))
+            2**torch.ceil(torch.log2(torch.tensor(params512.numel()))) - params512.numel())).to(DEVICE)))   
+        # preprocessing the parameters by matrix multipling R with xi
         params512 = torch.matmul(R512, params512)
 
         encs_brs_1024 = encoder(params1024)
