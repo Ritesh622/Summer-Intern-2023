@@ -6,7 +6,7 @@ def eval_weighted_average(metrics):
     accuracies = [num_examples * m["accuracy"] for num_examples, m in metrics]
     examples = [num_examples for num_examples, _ in metrics]
     ls = [m['losss'] for _, m in metrics]
-    print("\t\t", sum(ls)/len(ls))
+    print("\n\t\t", "validation loss:",  sum(ls)/len(ls), "\n")
     return {"accuracy": sum(accuracies) / sum(examples)}
 
 
